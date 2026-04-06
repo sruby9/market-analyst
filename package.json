@@ -1,0 +1,13 @@
+{
+  "name": "market-analyst",
+  "version": "2.0.0",
+  "description": "Autonomní AI tržní analytik",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0"
+  }
+}

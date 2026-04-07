@@ -307,9 +307,13 @@ const savePort = () => localStorage.setItem('mi_portfolio', JSON.stringify(portf
 async function fetchYahoo(syms) {
   const fields = 'regularMarketPrice,regularMarketChange,regularMarketChangePercent,fiftyTwoWeekLow,fiftyTwoWeekHigh,trailingPE,marketCap,shortName,regularMarketVolume';
   const url = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(syms.join(',')) + '&fields=' + fields;
+  const url2 = 'https://query2.finance.yahoo.com/v8/finance/quote?symbols=' + encodeURIComponent(syms.join(',')) + '&fields=' + fields;
   const proxies = [
     'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-    'https://corsproxy.io/?url=' + encodeURIComponent(url)
+    'https://corsproxy.io/?url=' + encodeURIComponent(url),
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url2),
+    'https://corsproxy.io/?url=' + encodeURIComponent(url2),
+    'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url)
   ];
   for (const p of proxies) {
     try {

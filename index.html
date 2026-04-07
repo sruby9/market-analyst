@@ -253,7 +253,7 @@ body{background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',monospac
 
 <div class="disclaimer">Informační podpora. Nepředstavuje investiční poradenství. Vždy proveďte vlastní due diligence.</div>
 <div class="footer">
-  <span>Data: Yahoo Finance · Reuters · BBC · FT</span>
+  <span>Data: Stooq · Yahoo Finance · Reuters · BBC · CNBC · FT</span>
   <span>AI: Claude Sonnet</span>
   <span id="nxt">—</span>
 </div>
@@ -303,17 +303,51 @@ const ss = (m, c='loading') => { document.getElementById('stxt').textContent = m
 const setTs = () => { const n = new Date(); document.getElementById('ts').textContent = n.toLocaleDateString('cs-CZ') + ' ' + n.toLocaleTimeString('cs-CZ',{hour:'2-digit',minute:'2-digit'}); };
 const savePort = () => localStorage.setItem('mi_portfolio', JSON.stringify(portfolio));
 
-// ─── FETCH YAHOO ──────────────────────────────────────────────────────────────
-async function fetchYahoo(syms) {
-  const fields = 'regularMarketPrice,regularMarketChange,regularMarketChangePercent,fiftyTwoWeekLow,fiftyTwoWeekHigh,trailingPE,marketCap,shortName,regularMarketVolume';
+// ─── FETCH MARKET DATA (multi-source) ────────────────────────────────────────
+// Source 1: Stooq.com – přímé CSV, bez proxy, CORS OK
+async function fetchStooq(syms) {
+  const results = [];
+  await Promise.all(syms.map(async sym => {
+    try {
+      const s = sym.replace('-', '.').toLowerCase();
+      const r = await fetch(`https://stooq.com/q/l/?s=${s}&f=sd2t2ohlcv&h&e=csv`);
+      if (!r.ok) return;
+      const text = await r.text();
+      const lines = text.trim().split('\n');
+      if (lines.length < 2) return;
+      const cols = lines[1].split(',');
+      // cols: Symbol,Date,Time,Open,High,Low,Close,Volume
+      const close = parseFloat(cols[6]);
+      const open = parseFloat(cols[3]);
+      if (!close || close <= 0) return;
+      const chg = close - open;
+      const chgPct = (chg / open) * 100;
+      const tn = TICKERS.find(t => t.s === sym);
+      results.push({
+        symbol: sym,
+        shortName: tn?.n || sym,
+        regularMarketPrice: close,
+        regularMarketChange: chg,
+        regularMarketChangePercent: chgPct,
+        fiftyTwoWeekLow: null,
+        fiftyTwoWeekHigh: null,
+        trailingPE: null,
+        marketCap: null,
+        regularMarketVolume: parseInt(cols[7]) || 0
+      });
+    } catch(e) { console.warn('Stooq fail:', sym, e); }
+  }));
+  return results;
+}
+
+// Source 2: Yahoo Finance přes allorigins (fallback)
+async function fetchYahooFallback(syms) {
+  const fields = 'regularMarketPrice,regularMarketChange,regularMarketChangePercent,fiftyTwoWeekLow,fiftyTwoWeekHigh,trailingPE,shortName,regularMarketVolume';
   const url = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + encodeURIComponent(syms.join(',')) + '&fields=' + fields;
-  const url2 = 'https://query2.finance.yahoo.com/v8/finance/quote?symbols=' + encodeURIComponent(syms.join(',')) + '&fields=' + fields;
   const proxies = [
     'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
     'https://corsproxy.io/?url=' + encodeURIComponent(url),
-    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url2),
-    'https://corsproxy.io/?url=' + encodeURIComponent(url2),
-    'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url)
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://query2.finance.yahoo.com/v8/finance/quote?symbols=' + encodeURIComponent(syms.join(',')) + '&fields=' + fields),
   ];
   for (const p of proxies) {
     try {
@@ -322,47 +356,73 @@ async function fetchYahoo(syms) {
       const d = await r.json();
       const res = d.quoteResponse?.result;
       if (res?.length) return res;
-    } catch(e) { console.warn('Yahoo proxy fail:', e); }
+    } catch(e) {}
   }
-  throw new Error('Yahoo Finance nedostupný. Zkuste obnovit.');
+  return [];
+}
+
+// Hlavní funkce – zkusí Stooq, pak Yahoo fallback
+async function fetchYahoo(syms) {
+  // Zkus Stooq jako primární zdroj
+  const stooqData = await fetchStooq(syms);
+  if (stooqData.length >= Math.floor(syms.length * 0.5)) {
+    // Doplň chybějící symboly ze Stooq
+    const found = new Set(stooqData.map(q => q.symbol));
+    const missing = syms.filter(s => !found.has(s));
+    if (missing.length > 0) {
+      const extra = await fetchYahooFallback(missing);
+      return [...stooqData, ...extra];
+    }
+    return stooqData;
+  }
+  // Stooq selhal – zkus Yahoo
+  const yahooData = await fetchYahooFallback(syms);
+  if (yahooData.length > 0) return yahooData;
+  throw new Error('Data nejsou dostupná. Zkuste obnovit za chvíli.');
 }
 
 // ─── FETCH NEWS ───────────────────────────────────────────────────────────────
+async function fetchRSS(url, sourceName) {
+  const proxies = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?url=',
+  ];
+  for (const proxy of proxies) {
+    try {
+      const r = await fetch(proxy + encodeURIComponent(url));
+      if (!r.ok) continue;
+      const text = await r.text();
+      const xml = new DOMParser().parseFromString(text, 'text/xml');
+      const items = Array.from(xml.querySelectorAll('item')).slice(0, 2);
+      if (items.length === 0) continue;
+      return items.map(item => ({
+        source: sourceName,
+        title: (item.querySelector('title')?.textContent || '').trim(),
+        link: (item.querySelector('link')?.textContent || item.querySelector('guid')?.textContent || '#').trim(),
+        date: item.querySelector('pubDate')?.textContent || ''
+      })).filter(i => i.title);
+    } catch(e) {}
+  }
+  return [];
+}
+
 async function fetchNews() {
   const sources = [
-    { name:'Reuters', url:'https://feeds.reuters.com/reuters/businessNews' },
-    { name:'BBC Business', url:'https://feeds.bbci.co.uk/news/business/rss.xml' },
-    { name:'FT', url:'https://www.ft.com/rss/home' }
+    { name: 'Reuters',      url: 'https://feeds.reuters.com/reuters/businessNews' },
+    { name: 'BBC Business', url: 'https://feeds.bbci.co.uk/news/business/rss.xml' },
+    { name: 'CNBC',         url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664' },
+    { name: 'MarketWatch',  url: 'https://feeds.marketwatch.com/marketwatch/topstories/' },
+    { name: 'FT',           url: 'https://www.ft.com/rss/home' },
   ];
-  const results = [];
-  for (const src of sources) {
-    try {
-      const r = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(src.url));
-      if (!r.ok) continue;
-      const xml = new DOMParser().parseFromString(await r.text(), 'text/xml');
-      Array.from(xml.querySelectorAll('item')).slice(0,2).forEach(item => {
-        const title = item.querySelector('title')?.textContent?.trim() || '';
-        const link = (item.querySelector('link')?.textContent || item.querySelector('guid')?.textContent || '#').trim();
-        const date = item.querySelector('pubDate')?.textContent || '';
-        if (title) results.push({ source: src.name, title, link, date });
-      });
-    } catch(e) { console.warn('News fail:', src.name); }
-  }
-  return results.slice(0,6);
+  const allResults = await Promise.all(sources.map(s => fetchRSS(s.url, s.name)));
+  return allResults.flat().slice(0, 8);
 }
 
 async function fetchTickerNews(sym) {
-  try {
-    const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${sym}&region=US&lang=en-US`;
-    const r = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url));
-    if (!r.ok) return [];
-    const xml = new DOMParser().parseFromString(await r.text(), 'text/xml');
-    return Array.from(xml.querySelectorAll('item')).slice(0,3).map(item => ({
-      source: 'Yahoo Finance',
-      title: (item.querySelector('title')?.textContent || '').trim(),
-      link: (item.querySelector('link')?.textContent || item.querySelector('guid')?.textContent || '#').trim()
-    }));
-  } catch(e) { return []; }
+  // Zkus Yahoo RSS pro ticker
+  const yahooUrl = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${sym}&region=US&lang=en-US`;
+  const items = await fetchRSS(yahooUrl, 'Yahoo Finance');
+  return items.slice(0, 3).map(i => ({ source: i.source, title: i.title, link: i.link }));
 }
 
 // ─── CLAUDE ───────────────────────────────────────────────────────────────────
@@ -387,7 +447,7 @@ async function runMarket() {
   ss('Stahuji tržní data...'); setTs();
 
   try {
-    document.getElementById('lmsg').textContent = 'Připojuji se k Yahoo Finance...';
+    document.getElementById('lmsg').textContent = 'Stahuji data ze Stooq...';
     const md = await fetchYahoo(TICKERS.map(t => t.s));
     if (!md.length) throw new Error('Žádná data z Yahoo Finance');
     md.forEach(q => { mktCache[q.symbol] = q; });
